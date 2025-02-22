@@ -6,11 +6,15 @@ import mysql.connector
 
 # --- Database Configuration ---
 # These environment variables can be set in your shell or via a config management tool
+if os.path.exists('.env'):
+    from dotenv import load_dotenv
+    load_dotenv()
+
 db_config = {
-    'host': os.environ.get('DB_HOST', 'localhost'),
-    'user': os.environ.get('DB_USER', 'your_user'),
-    'password': os.environ.get('DB_PASSWORD', 'your_password'),
-    'database': os.environ.get('DB_NAME', 'your_database')
+    'host': os.getenv('DB_HOST') or os.environ.get('DB_HOST', 'localhost'),
+    'user': os.getenv('DB_USER') or os.environ.get('DB_USER', 'liquidity'),
+    'password': os.getenv('DB_PASSWORD') or os.environ.get('DB_PASSWORD', 'hackermanimin'),
+    'database': os.getenv('DB_NAME') or os.environ.get('DB_NAME', 'prices')
 }
 
 # Connect to the MySQL database running on the same EC2 instance
