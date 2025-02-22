@@ -7,3 +7,4 @@ subnet_prices.csv
 subnet_prices.log
 subnet_rest.log
 subnets.csv
+.env
