@@ -3,6 +3,8 @@ import math
 import mysql.connector
 from datetime import datetime, timedelta
 from collections import defaultdict
+from scipy.signal import savgol_filter  # For smoothing the acceleration vector
+import numpy as np
 
 def compute_acceleration(time_series, nominal_timeframe):
     """
@@ -22,7 +24,7 @@ def compute_acceleration(time_series, nominal_timeframe):
 
     alpha_tf = 2 / (effective_tf + 1)
     ema = None
-    diffs = []  # List of tuples (timestamp, TP - EMA)
+    diffs = []  # List of (timestamp, TP - EMA)
     for ts, tp in time_series:
         if ema is None:
             ema = tp
@@ -40,13 +42,33 @@ def compute_acceleration(time_series, nominal_timeframe):
     acceleration = (diff_last - diff_prev) / dt
     return acceleration
 
+def compute_rolling_acceleration(time_series, nominal_timeframe, roll_window=5):
+    """
+    Computes a rolling acceleration vector for a given time_series and nominal timeframe.
+    For each rolling window (of size roll_window), compute acceleration.
+    Returns a list of acceleration values.
+    """
+    roll_accels = []
+    n = len(time_series)
+    if n < roll_window:
+        return roll_accels
+    for i in range(n - roll_window + 1):
+        window = time_series[i:i+roll_window]
+        accel = compute_acceleration(window, nominal_timeframe)
+        if accel is not None:
+            roll_accels.append(accel)
+    return roll_accels
+
 def main():
     # Hyperparameters
-    window_minutes = 240                     # EMA window (minutes) for subnet-level calculations.
-    max_gap_seconds = 75                    # Maximum allowed gap between timestamps.
-    timeframes = [5, 10, 15, 60, 240]        # Nominal timeframes for acceleration analysis (in minutes).
-    alpha = 2 / (window_minutes + 1)          # Smoothing factor for subnet-level EMA.
-    max_tf = max(timeframes)                 # Maximum nominal timeframe for historical query.
+    window_minutes = 240              # EMA window (minutes) for subnet-level calculations.
+    max_gap_seconds = 75              # Maximum allowed gap between timestamps.
+    timeframes = [5, 10, 15, 60, 240]  # Nominal timeframes for acceleration analysis (in minutes).
+    alpha = 2 / (window_minutes + 1)    # Smoothing factor for subnet-level EMA.
+    max_tf = max(timeframes)           # Maximum nominal timeframe for historical query.
+    roll_window = 5                   # Rolling window size for acceleration computation.
+    savgol_window = 5                 # Window length for Savitzky-Golay filter (must be odd).
+    polyorder = 2                     # Polynomial order for Savitzky-Golay filter.
 
     # ANSI escape sequences for colors.
     GREEN = "\033[92m"
@@ -99,6 +121,7 @@ def main():
         return
 
     # Group records by netuid (for subnet-level calculations).
+    from collections import defaultdict
     groups = defaultdict(list)
     for rec in records:
         groups[rec['netuid']].append(rec)
@@ -118,7 +141,7 @@ def main():
     """
     cursor.execute(query_tf, (lower_bound_tf,))
     records_tf = cursor.fetchall()
-    # Build total_by_ts dictionary: for each timestamp, sum prices from netuid != 0.
+    # Build total_by_ts: for each timestamp, sum prices from netuid != 0.
     total_by_ts = {}
     for rec in records_tf:
         if rec['netuid'] == 0:
@@ -129,7 +152,7 @@ def main():
     # Create a sorted time series: list of (timestamp, total_price).
     time_series = sorted(total_by_ts.items())
 
-    # Compute Total Price EMA over the entire time series using the same alpha as before.
+    # Compute Total Price EMA over the entire time series using the same alpha.
     ema_total = None
     for ts, tp in time_series:
         if ema_total is None:
@@ -139,42 +162,44 @@ def main():
 
     # Display Total Price and Total Price EMA.
     print(f"Total Price: {total_price:.6f}")
-    # If current total price is lower than its EMA (indicating downtrend), display current TP in red.
     if total_price > ema_total:
         total_trend_str = f"{GREEN}{ema_total:.6f}{RESET}"
     else:
         total_trend_str = f"{RED}{total_price:.6f}{RESET}"
     print(f"Total Price EMA: {total_trend_str}")
 
-    # Compute acceleration metrics for each nominal timeframe and display.
+    # Compute acceleration metrics for each nominal timeframe.
     print("\nAcceleration/Deceleration of Total Price (TP - EMA) per timeframe:")
-    # Determine available data span (in minutes) from the time series
     if time_series:
         available_tf = (time_series[-1][0] - time_series[0][0]).total_seconds() / 60.0
     else:
         available_tf = 0
 
     for tf in timeframes:
-        # If available data span is less than the nominal timeframe, use entire time_series.
+        # If we don't have enough data to cover this timeframe, print N/A
         if available_tf < tf:
-            ts_filtered = time_series
-        else:
-            lower_bound_current = max_ts_dt - timedelta(minutes=tf)
-            ts_filtered = [(ts, tp) for ts, tp in time_series if ts >= lower_bound_current]
-        if len(ts_filtered) < 2:
             acc_str = "N/A"
         else:
-            acc = compute_acceleration(ts_filtered, tf)
-            if acc is None:
+            # Filter to data within the last 'tf' minutes
+            lower_bound_current = max_ts_dt - timedelta(minutes=tf)
+            ts_filtered = [(ts, tp) for ts, tp in time_series if ts >= lower_bound_current]
+            # Compute rolling acceleration vector
+            roll_accels = compute_rolling_acceleration(ts_filtered, tf, roll_window)
+            if len(roll_accels) < 3:
+                smoothed_accel = roll_accels[-1] if roll_accels else None
+            else:
+                # Use Savitzky-Golay filter to smooth the acceleration vector.
+                smoothed_accel = savgol_filter(np.array(roll_accels), window_length=savgol_window, polyorder=polyorder)[-1]
+            if smoothed_accel is None:
                 acc_str = "N/A"
             else:
-                if acc > 0:
-                    acc_str = f"{GREEN}{acc:+.6f}{RESET}"
+                if smoothed_accel > 0:
+                    acc_str = f"{GREEN}{smoothed_accel:+.6f}{RESET}"
                 else:
-                    acc_str = f"{RED}{acc:+.6f}{RESET}"
+                    acc_str = f"{RED}{smoothed_accel:+.6f}{RESET}"
         print(f"  {tf}m: {acc_str}")
 
-    # For subnet-level processing: update max_candle_count and compute subnet EMAs.
+    # For subnet-level processing: compute subnet EMAs and other stats.
     max_candle_count = 0
     results = []
     for netuid, recs in groups.items():
@@ -216,13 +241,11 @@ def main():
             'std_price': std_price
         })
 
-    # Print the EMA window info for subnet-level data.
     print(f"\nEMA - {window_minutes}m ({max_candle_count} objects)")
 
     # Sort subnet results by current emission descending and take the top 10.
     results = sorted(results, key=lambda x: x['current_emission'], reverse=True)[:10]
 
-    # Print the table header for subnet details.
     header = (f"{'netuid':>6}  {'Curr Price':>14}  {'EMA Price':>14}  "
               f"{'Curr Emission':>16}  {'EMA Emission':>14}  {'std_price':>12}")
     print(header)
