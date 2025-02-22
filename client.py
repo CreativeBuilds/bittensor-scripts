@@ -29,17 +29,17 @@ def interpret_trend(final_gap, delta_gap):
     """
     Produce a text label indicating whether the gap is diverging or converging,
     and in which direction.
-    
+
     Logic:
-      - final_gap > 0 implies 'Up'; final_gap < 0 implies 'Down'.
-      - delta_gap > 0 implies Diverging; delta_gap < 0 implies Converging.
-    
+      - final_gap > 0 => Up; final_gap < 0 => Down.
+      - delta_gap > 0 => Diverging; delta_gap < 0 => Converging.
+      
     Combined:
       Diverging + Up    => [green]"Bullish"[/green]
       Diverging + Down  => [red]"Bearish"[/red]
       Converging + Up   => [red]"Pull Back"[/red]
       Converging + Down => [green]"Reversal"[/green]
-      Otherwise       => "Neutral"
+      Otherwise         => "Neutral"
     """
     try:
         fg = float(final_gap)
@@ -47,7 +47,6 @@ def interpret_trend(final_gap, delta_gap):
     except (TypeError, ValueError):
         return "[white]N/A[/white]"
     
-    # Treat near-zero values as neutral.
     if abs(fg) < 1e-12 or abs(dg) < 1e-12:
         return "[white]Neutral[/white]"
     
@@ -70,7 +69,7 @@ def display_analysis(analysis):
         console.print("[bold red]No analysis data available.[/bold red]")
         return
 
-    # Global total price info
+    # Global Total Price Panel
     total_price = analysis.get("total_price", "N/A")
     total_price_ema = analysis.get("total_price_ema", "N/A")
     try:
@@ -84,13 +83,12 @@ def display_analysis(analysis):
     except Exception:
         total_price_str = str(total_price)
         total_price_ema_str = str(total_price_ema)
-
+    
     panel_text = (
         f"[bold cyan]Total Price:[/bold cyan] {total_price_str}\n"
         f"[bold cyan]Total Price EMA:[/bold cyan] {total_price_ema_str}"
     )
-
-    # Global total price gap analysis (5m vs 60m)
+    
     final_gap_total_price = analysis.get("final_gap_total_price")
     delta_gap_total_price = analysis.get("delta_gap_total_price")
     if final_gap_total_price is not None and delta_gap_total_price is not None:
@@ -105,55 +103,69 @@ def display_analysis(analysis):
             f"\n[bold cyan]Global Gap Δ(5m):[/bold cyan] {delta_gap_str}"
             f"\n[bold cyan]Global Trend:[/bold cyan] {global_trend}"
         )
-    console.print(Panel(panel_text, title="Global Analysis", style="bold blue"))
-
+    console.print(Panel(panel_text, title="Global Analysis", style="bold blue", expand=True))
+    
     # Subnet-level analysis
     subnet_trends = analysis.get("subnet_gap_trends", [])
-    if subnet_trends:
-        # Sort by current_emission descending
-        subnet_trends_sorted = sorted(subnet_trends, key=lambda x: float(x.get("current_emission", 0)), reverse=True)
-        trend_table = Table(title="Subnet EMA Gap Trends (Top 10)", box=box.DOUBLE_EDGE)
-        trend_table.add_column("Netuid", justify="right")
-        trend_table.add_column("Current Emission", justify="right")
-        trend_table.add_column("EMA5 Price", justify="right")
-        trend_table.add_column("EMA60 Price", justify="right")
-        trend_table.add_column("Gap Price", justify="right")
-        trend_table.add_column("Gap Price Δ(5m)", justify="right")
-        trend_table.add_column("Price Trend", justify="center")
-        trend_table.add_column("EMA5 Emission", justify="right")
-        trend_table.add_column("EMA60 Emission", justify="right")
-        trend_table.add_column("Gap Emission", justify="right")
-        trend_table.add_column("Gap Emission Δ(5m)", justify="right")
-        trend_table.add_column("Emission Trend", justify="center")
-        
-        for trend in subnet_trends_sorted:
-            final_gap_price = trend.get("final_gap_price", 0)
-            delta_gap_price = trend.get("delta_gap_price", 0)
-            final_gap_emission = trend.get("final_gap_emission", 0)
-            delta_gap_emission = trend.get("delta_gap_emission", 0)
-            
-            price_delta_str = color_numeric_delta(delta_gap_price)
-            emiss_delta_str = color_numeric_delta(delta_gap_emission)
-            price_trend_str = interpret_trend(final_gap_price, delta_gap_price)
-            emiss_trend_str = interpret_trend(final_gap_emission, delta_gap_emission)
-            
-            trend_table.add_row(
-                str(trend.get("netuid", "N/A")),
-                f'{trend.get("current_emission", "N/A")}',
-                f'{trend.get("final_ema5_price", "N/A")}',
-                f'{trend.get("final_ema60_price", "N/A")}',
-                f'{trend.get("final_gap_price", "N/A")}',
-                price_delta_str,
-                price_trend_str,
-                f'{trend.get("final_ema5_emission", "N/A")}',
-                f'{trend.get("final_ema60_emission", "N/A")}',
-                f'{trend.get("final_gap_emission", "N/A")}',
-                emiss_delta_str,
-                emiss_trend_str,
-            )
-        console.print(trend_table)
-    else:
+    if not subnet_trends:
         console.print("[bold red]No subnet gap trend analysis available.[/bold red]")
+        return
+    # Sort by current_emission descending
+    subnet_trends_sorted = sorted(subnet_trends, key=lambda x: float(x.get("current_emission", 0)), reverse=True)
+    
+    # ---- Price Trends Table ----
+    price_table = Table(title="Price Trends (Top 10)", box=box.DOUBLE_EDGE, expand=True)
+    price_table.add_column("Netuid", justify="right")
+    price_table.add_column("Current Price", justify="right")
+    price_table.add_column("EMA5 Price", justify="right")
+    price_table.add_column("EMA60 Price", justify="right")
+    price_table.add_column("Gap Price", justify="right")
+    price_table.add_column("Gap Price Δ(5m)", justify="right")
+    price_table.add_column("Price Trend", justify="center")
+    
+    for trend in subnet_trends_sorted:
+        final_gap_price = trend.get("final_gap_price", 0)
+        delta_gap_price = trend.get("delta_gap_price", 0)
+        price_delta_str = color_numeric_delta(delta_gap_price)
+        price_trend_str = interpret_trend(final_gap_price, delta_gap_price)
+        # Assume that the server sends a "current_price" field per subnet trend.
+        current_price = trend.get("current_price", "N/A")
+        price_table.add_row(
+            str(trend.get("netuid", "N/A")),
+            f"{current_price}",
+            f'{trend.get("final_ema5_price", "N/A")}',
+            f'{trend.get("final_ema60_price", "N/A")}',
+            f'{trend.get("final_gap_price", "N/A")}',
+            price_delta_str,
+            price_trend_str,
+        )
+    console.print(price_table)
+    
+    # ---- Emission Trends Table ----
+    emiss_table = Table(title="Emission Trends (Top 10)", box=box.DOUBLE_EDGE, expand=True)
+    emiss_table.add_column("Netuid", justify="right")
+    emiss_table.add_column("Current Emission", justify="right")
+    emiss_table.add_column("EMA5 Emission", justify="right")
+    emiss_table.add_column("EMA60 Emission", justify="right")
+    emiss_table.add_column("Gap Emission", justify="right")
+    emiss_table.add_column("Gap Emission Δ(5m)", justify="right")
+    emiss_table.add_column("Emission Trend", justify="center")
+    
+    for trend in subnet_trends_sorted:
+        final_gap_emission = trend.get("final_gap_emission", 0)
+        delta_gap_emission = trend.get("delta_gap_emission", 0)
+        emiss_delta_str = color_numeric_delta(delta_gap_emission)
+        emiss_trend_str = interpret_trend(final_gap_emission, delta_gap_emission)
+        emiss_table.add_row(
+            str(trend.get("netuid", "N/A")),
+            f'{trend.get("current_emission", "N/A")}',
+            f'{trend.get("final_ema5_emission", "N/A")}',
+            f'{trend.get("final_ema60_emission", "N/A")}',
+            f'{trend.get("final_gap_emission", "N/A")}',
+            emiss_delta_str,
+            emiss_trend_str,
+        )
+    console.print(emiss_table)
 
 def log_details():
     url = f"{BASE_URL}/subnets"
