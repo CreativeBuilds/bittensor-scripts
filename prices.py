@@ -186,7 +186,27 @@ def main():
             continue
         groups[rec['netuid']].append(rec)
     
-    # Process each subnet.
+    # --- Global Total Price & EMA (for all subnets excluding subnet 0) ---
+    total_price = sum(float(recs[-1]['price']) for netuid, recs in groups.items())
+    total_by_ts = {}
+    for rec in records:
+        if rec['netuid'] == 0:
+            continue
+        ts = rec['snapshot_timestamp']
+        total_by_ts.setdefault(ts, 0)
+        total_by_ts[ts] += float(rec['price'])
+    time_series = sorted(total_by_ts.items())
+    ema_total = None
+    for ts, tp in time_series:
+        if ema_total is None:
+            ema_total = tp
+        else:
+            ema_total = alpha * tp + (1 - alpha) * ema_total
+    total_trend_str = f"{GREEN}{total_price:.6f}{RESET}" if total_price > ema_total else f"{RED}{total_price:.6f}{RESET}"
+    print(f"Total Price: {total_trend_str}")
+    print(f"Total Price EMA: {ema_total:.6f}")
+
+    # --- Subnet-Level 5m vs 60m EMA Gap Trend Analysis ---
     subnet_results = []
     for netuid, recs in groups.items():
         recs.sort(key=lambda r: r['snapshot_timestamp'])
@@ -210,7 +230,8 @@ def main():
     # Filter to top 10 subnets by current emission (highest first).
     subnet_results.sort(key=lambda x: x['current_emission'], reverse=True)
     top_subnets = subnet_results[:10]
-    
+    # Optionally, re-sort top subnets by netuid.
+    top_subnets.sort(key=lambda x: x['netuid'])
     display_subnet_ema_gap_table(top_subnets)
 
     cursor.close()
