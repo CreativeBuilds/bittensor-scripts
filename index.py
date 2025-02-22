@@ -36,10 +36,8 @@ cursor.execute('''
         id INT AUTO_INCREMENT PRIMARY KEY,
         snapshot_id INT NOT NULL,
         netuid INT NOT NULL,
-        subnet_name VARCHAR(255) NOT NULL,
         price DECIMAL(12,6) NOT NULL,
         emission DECIMAL(12,6) NOT NULL,
-        symbol VARCHAR(10) NOT NULL,
         FOREIGN KEY (snapshot_id) REFERENCES subnet_snapshots(snapshot_id)
     )
 ''')
@@ -76,10 +74,8 @@ while True:
 
         subnet_data.append({
             'netuid': info.netuid,
-            'subnet_name': info.subnet_name,
             'price': current_price,
-            'emission': emission_val,
-            'symbol': info.symbol
+            'emission': emission_val
         })
 
     # Sort by emission descending
@@ -96,14 +92,14 @@ while True:
     print(f"\nTimestamp: {timestamp}")
     print("Top 10 Subnets by Emission:")
     for data in top10:
-        print(f"Netuid: {data['netuid']}  Subnet: {data['subnet_name']}  Price: {data['price']:.4f} {data['symbol']}  Emission: {data['emission']:.4f}")
+        print(f"Netuid: {data['netuid']}  Price: {data['price']:.4f}  Emission: {data['emission']:.4f}")
     
     # --- File Logging (Rest of the Subnets) ---
     if rest:
         with open("subnet_rest.log", "a") as log_file:
             log_file.write(f"\nTimestamp: {timestamp}\n")
             for data in rest:
-                log_file.write(f"Netuid: {data['netuid']}  Subnet: {data['subnet_name']}  Price: {data['price']:.4f} {data['symbol']}  Emission: {data['emission']:.4f}\n")
+                log_file.write(f"Netuid: {data['netuid']}  Price: {data['price']:.4f}  Emission: {data['emission']:.4f}\n")
     
     # --- MySQL Logging in Normalized Form ---
     # Insert snapshot record first and retrieve its snapshot_id
@@ -113,17 +109,15 @@ while True:
 
     # Insert each subnet record associated with this snapshot
     insert_record_query = '''
-        INSERT INTO subnet_records (snapshot_id, netuid, subnet_name, price, emission, symbol)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO subnet_records (snapshot_id, netuid, price, emission)
+        VALUES (%s, %s, %s, %s)
     '''
     for data in subnet_data_sorted:
         cursor.execute(insert_record_query, (
             snapshot_id,
             data['netuid'],
-            data['subnet_name'],
             data['price'],
-            data['emission'],
-            data['symbol']
+            data['emission']
         ))
     conn.commit()
     
@@ -132,15 +126,13 @@ while True:
     with open("subnets.csv", "a", newline="") as csvfile:
         writer = csv.writer(csvfile)
         if not csv_file_exists:
-            writer.writerow(["timestamp", "netuid", "subnet_name", "price", "emission", "symbol"])
+            writer.writerow(["timestamp", "netuid", "price", "emission"])
         for data in subnet_data_sorted:
             writer.writerow([
                 timestamp,
                 data['netuid'],
-                data['subnet_name'],
                 f"{data['price']:.4f}",
-                f"{data['emission']:.4f}",
-                data['symbol']
+                f"{data['emission']:.4f}"
             ])
     
     # Wait 60 seconds before the next snapshot
