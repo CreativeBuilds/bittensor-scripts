@@ -92,9 +92,11 @@ def compute_subnet_gap_trends(records):
       - 60m EMA for price (using records from last 60 minutes)
       - 5m EMA for emission (using records from last 5 minutes)
       - 60m EMA for emission (using records from last 60 minutes)
+
     Then define the gap as: Gap(t) = EMA_5m(t) - EMA_60m(t)
     and compute the change (delta) in the gap over the 5-minute window 
     (delta = gap_end - gap_begin).
+
     Returns a dictionary with:
       - final_ema5_price, final_ema60_price, final_gap_price, delta_gap_price,
       - final_ema5_emission, final_ema60_emission, final_gap_emission, delta_gap_emission
@@ -113,7 +115,7 @@ def compute_subnet_gap_trends(records):
     series_60_emission = [(rec['snapshot_timestamp'], float(rec['emission']))
                           for rec in records if rec['snapshot_timestamp'] >= window_60]
     
-    # Need at least two points in the 5m series to measure change.
+    # Need at least two points in the 5m series to measure a 5-minute delta
     if len(series_5_price) < 2 or len(series_60_price) < 1 or len(series_5_emission) < 2 or len(series_60_emission) < 1:
         return None
     
@@ -144,11 +146,14 @@ def compute_subnet_gap_trends(records):
 def get_gap_analysis():
     """
     Compute overall analysis for subnet gap trends over the last 240 minutes.
-    Returns a dictionary with overall total price, its EMA, and a list of
-    computed gap trends for each subnet (top 10 by current emission).
+    Returns a dictionary with:
+      - total_price: the sum of the last-known price from each subnet
+      - total_price_ema: the overall EMA of total price over the 240-minute window
+      - final_gap_total_price, delta_gap_total_price: the 5m vs. 60m gap for total price
+      - subnet_gap_trends: list of top 10 subnets by emission, each with 5m vs 60m gap data
     """
     window_minutes = 240
-    # Get latest snapshot timestamp
+    # Get the latest snapshot timestamp
     db_cursor.execute("SELECT MAX(snapshot_timestamp) AS max_ts FROM subnet_snapshots")
     max_ts_result = db_cursor.fetchone()
     if not max_ts_result or not max_ts_result['max_ts']:
@@ -156,6 +161,7 @@ def get_gap_analysis():
     max_ts_dt = max_ts_result['max_ts']
     lower_bound = max_ts_dt - timedelta(minutes=window_minutes)
 
+    # Query all relevant subnet_records + snapshot timestamps
     query = """
     SELECT r.netuid, r.price, r.emission, s.snapshot_timestamp
     FROM subnet_records r
@@ -168,23 +174,27 @@ def get_gap_analysis():
     if not records:
         return None
 
+    # Group by netuid, ignoring netuid=0
     groups = defaultdict(list)
     for rec in records:
-        # Convert snapshot_timestamp if needed (assumed already datetime)
         if rec['netuid'] == 0:
             continue
         groups[rec['netuid']].append(rec)
 
-    # Compute global total price and total price EMA
+    # Compute the sum of each subnet’s latest price => total_price
     total_price = sum(float(recs[-1]['price']) for netuid, recs in groups.items() if recs)
+
+    # Build a global time series for total price => (timestamp, total_price_at_that_ts)
     total_by_ts = {}
     for rec in records:
         if rec['netuid'] == 0:
             continue
         ts = rec['snapshot_timestamp']
-        total_by_ts.setdefault(ts, 0)
+        total_by_ts.setdefault(ts, 0.0)
         total_by_ts[ts] += float(rec['price'])
-    time_series = sorted(total_by_ts.items())
+
+    # Sort by timestamp, compute an EMA over the entire 240-min window
+    time_series = sorted(total_by_ts.items())  # list of (ts, total_price_at_ts)
     ema_total = None
     alpha = 2 / (window_minutes + 1)
     for ts, tp in time_series:
@@ -193,6 +203,27 @@ def get_gap_analysis():
         else:
             ema_total = alpha * tp + (1 - alpha) * ema_total
 
+    # ---- Now compute a 5m vs. 60m gap for the *global* total price ----
+    # We want the last 5 min and last 60 min from the global time_series.
+    window_5 = max_ts_dt - timedelta(minutes=5)
+    window_60 = max_ts_dt - timedelta(minutes=60)
+
+    time_series_5 = [(ts, val) for (ts, val) in time_series if ts >= window_5]
+    time_series_60 = [(ts, val) for (ts, val) in time_series if ts >= window_60]
+
+    final_gap_total_price = None
+    delta_gap_total_price = None
+
+    # We need at least two points in the 5-minute slice to measure a 5-minute delta
+    if len(time_series_5) >= 2 and len(time_series_60) >= 1:
+        ema5_series = compute_ema(time_series_5, 5)
+        ema60_series = compute_ema(time_series_60, 60)
+        gap_begin = ema5_series[0][1] - ema60_series[0][1]
+        gap_end = ema5_series[-1][1] - ema60_series[-1][1]
+        final_gap_total_price = gap_end
+        delta_gap_total_price = gap_end - gap_begin
+
+    # ---- Subnet-level 5m vs 60m gap analysis ----
     subnet_results = []
     for netuid, recs in groups.items():
         recs.sort(key=lambda r: r['snapshot_timestamp'])
@@ -213,7 +244,7 @@ def get_gap_analysis():
             'delta_gap_emission': gap_info['delta_gap_emission']
         })
 
-    # Filter to top 10 subnets by current emission (highest first) then sort by netuid
+    # Filter to top 10 subnets by current emission (highest first), then sort by netuid
     subnet_results.sort(key=lambda x: x['current_emission'], reverse=True)
     top_subnets = subnet_results[:10]
     top_subnets.sort(key=lambda x: x['netuid'])
@@ -221,6 +252,8 @@ def get_gap_analysis():
     return {
         'total_price': total_price,
         'total_price_ema': ema_total,
+        'final_gap_total_price': final_gap_total_price,      # <-- global 5m vs 60m gap
+        'delta_gap_total_price': delta_gap_total_price,      # <-- global gap 5m delta
         'subnet_gap_trends': top_subnets
     }
 
