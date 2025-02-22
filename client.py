@@ -12,12 +12,12 @@ console = Console(force_terminal=True, color_system="standard", no_color=False)
 def color_numeric_delta(delta):
     """
     Return a string with the numeric delta color-coded:
-    Positive -> green, Negative -> red, Zero -> white
+    Positive -> green, Negative -> red, Zero -> white.
     """
     try:
         val = float(delta)
     except (TypeError, ValueError):
-        return str(delta)  # non-numeric or missing
+        return str(delta)
     if val > 0:
         return f"[green]{val:.6f}[/green]"
     elif val < 0:
@@ -28,62 +28,54 @@ def color_numeric_delta(delta):
 def interpret_trend(final_gap, delta_gap):
     """
     Produce a text label indicating whether the gap is diverging or converging,
-    and in which direction (Bullish, Bearish, Pull Back, Reversal, etc.)
-
+    and in which direction.
+    
     Logic:
-      - final_gap > 0 => Up; final_gap < 0 => Down
-      - delta_gap > 0 => Diverging; delta_gap < 0 => Converging
-
+      - final_gap > 0 implies 'Up'; final_gap < 0 implies 'Down'.
+      - delta_gap > 0 implies Diverging; delta_gap < 0 implies Converging.
+    
     Combined:
       Diverging + Up    => [green]"Bullish"[/green]
       Diverging + Down  => [red]"Bearish"[/red]
-      Converging + Up   => [green]"Pull Back"[/green]
-      Converging + Down => [red]"Reversal"[/red]
-      If either is near zero => "Neutral"
+      Converging + Up   => [red]"Pull Back"[/red]
+      Converging + Down => [green]"Reversal"[/green]
+      Otherwise       => "Neutral"
     """
     try:
         fg = float(final_gap)
         dg = float(delta_gap)
     except (TypeError, ValueError):
         return "[white]N/A[/white]"
-
-    # Consider near-zero as neutral
+    
+    # Treat near-zero values as neutral.
     if abs(fg) < 1e-12 or abs(dg) < 1e-12:
         return "[white]Neutral[/white]"
-
+    
     direction = "up" if fg > 0 else "down"
     divergence = "diverging" if dg > 0 else "converging"
-
+    
     if divergence == "diverging" and direction == "up":
         return "[green]Bullish[/green]"
     elif divergence == "diverging" and direction == "down":
         return "[red]Bearish[/red]"
     elif divergence == "converging" and direction == "up":
-        return "[green]Pull Back[/green]"
+        return "[red]Pull Back[/red]"
     elif divergence == "converging" and direction == "down":
-        return "[red]Reversal[/red]"
+        return "[green]Reversal[/green]"
     else:
         return "[white]Neutral[/white]"
 
 def display_analysis(analysis):
-    """
-    Displays:
-      - Total Price vs. Total Price EMA (basic global info)
-      - Numeric, color-coded gap and delta for the global total price
-      - A textual "Global Trend" label (Bullish, Bearish, etc.)
-      - A table of subnet-level 5m vs. 60m gap data
-    """
     if not analysis:
         console.print("[bold red]No analysis data available.[/bold red]")
         return
 
-    # ---- Basic total price vs. total price EMA (color-coded) ----
+    # Global total price info
     total_price = analysis.get("total_price", "N/A")
     total_price_ema = analysis.get("total_price_ema", "N/A")
     try:
         total_price_val = float(total_price)
         total_price_ema_val = float(total_price_ema)
-        # If total price is above EMA, color green; otherwise red
         if total_price_val > total_price_ema_val:
             total_price_str = f"[green]{total_price_val:.6f}[/green]"
         else:
@@ -93,36 +85,33 @@ def display_analysis(analysis):
         total_price_str = str(total_price)
         total_price_ema_str = str(total_price_ema)
 
-    # Build the panel text with total price vs. EMA
     panel_text = (
         f"[bold cyan]Total Price:[/bold cyan] {total_price_str}\n"
         f"[bold cyan]Total Price EMA:[/bold cyan] {total_price_ema_str}"
     )
 
-    # ---- Global total price gap info (5m vs. 60m) ----
+    # Global total price gap analysis (5m vs 60m)
     final_gap_total_price = analysis.get("final_gap_total_price")
     delta_gap_total_price = analysis.get("delta_gap_total_price")
     if final_gap_total_price is not None and delta_gap_total_price is not None:
-        # Show numeric gap and numeric delta (color-coded)
         try:
             final_gap_str = f"{float(final_gap_total_price):.6f}"
         except (TypeError, ValueError):
             final_gap_str = str(final_gap_total_price)
         delta_gap_str = color_numeric_delta(delta_gap_total_price)
-        # Also interpret the textual trend (Bullish, Bearish, etc.)
         global_trend = interpret_trend(final_gap_total_price, delta_gap_total_price)
         panel_text += (
             f"\n\n[bold cyan]Global Price Gap (5m vs 60m):[/bold cyan] {final_gap_str}"
             f"\n[bold cyan]Global Gap Δ(5m):[/bold cyan] {delta_gap_str}"
             f"\n[bold cyan]Global Trend:[/bold cyan] {global_trend}"
         )
-
-    # Print the panel
     console.print(Panel(panel_text, title="Global Analysis", style="bold blue"))
 
-    # ---- Subnet-level 5m vs 60m gap trends (Top 10) ----
+    # Subnet-level analysis
     subnet_trends = analysis.get("subnet_gap_trends", [])
     if subnet_trends:
+        # Sort by current_emission descending
+        subnet_trends_sorted = sorted(subnet_trends, key=lambda x: float(x.get("current_emission", 0)), reverse=True)
         trend_table = Table(title="Subnet EMA Gap Trends (Top 10)", box=box.DOUBLE_EDGE)
         trend_table.add_column("Netuid", justify="right")
         trend_table.add_column("Current Emission", justify="right")
@@ -136,21 +125,18 @@ def display_analysis(analysis):
         trend_table.add_column("Gap Emission", justify="right")
         trend_table.add_column("Gap Emission Δ(5m)", justify="right")
         trend_table.add_column("Emission Trend", justify="center")
-
-        for trend in subnet_trends:
+        
+        for trend in subnet_trends_sorted:
             final_gap_price = trend.get("final_gap_price", 0)
             delta_gap_price = trend.get("delta_gap_price", 0)
             final_gap_emission = trend.get("final_gap_emission", 0)
             delta_gap_emission = trend.get("delta_gap_emission", 0)
-
-            # Numeric, color-coded deltas
+            
             price_delta_str = color_numeric_delta(delta_gap_price)
             emiss_delta_str = color_numeric_delta(delta_gap_emission)
-
-            # Textual trends
             price_trend_str = interpret_trend(final_gap_price, delta_gap_price)
             emiss_trend_str = interpret_trend(final_gap_emission, delta_gap_emission)
-
+            
             trend_table.add_row(
                 str(trend.get("netuid", "N/A")),
                 f'{trend.get("current_emission", "N/A")}',
@@ -170,11 +156,6 @@ def display_analysis(analysis):
         console.print("[bold red]No subnet gap trend analysis available.[/bold red]")
 
 def log_details():
-    """
-    Fetch the /subnets endpoint, extract the analysis portion,
-    and display it with numeric deltas and textual trends
-    (for both global total price and subnets).
-    """
     url = f"{BASE_URL}/subnets"
     try:
         response = requests.get(url)
@@ -188,7 +169,6 @@ def log_details():
 
 def main():
     while True:
-        # Clear the terminal (works on Unix and Windows)
         os.system('cls' if os.name == 'nt' else 'clear')
         log_details()
         time.sleep(60)
