@@ -6,6 +6,11 @@ from collections import defaultdict
 from scipy.signal import savgol_filter  # For smoothing the acceleration vector
 import numpy as np
 
+# ANSI escape sequences for colors.
+GREEN = "\033[92m"
+RED = "\033[91m"
+RESET = "\033[0m"
+
 def compute_acceleration(time_series, nominal_timeframe):
     """
     Given a sorted list of (timestamp, total_price) and a nominal timeframe (in minutes),
@@ -15,9 +20,7 @@ def compute_acceleration(time_series, nominal_timeframe):
     """
     if not time_series:
         return None
-    # Determine the actual available time span in minutes
     actual_time = (time_series[-1][0] - time_series[0][0]).total_seconds() / 60.0
-    # Use the full available span if it's less than the nominal timeframe
     effective_tf = nominal_timeframe if actual_time >= nominal_timeframe else actual_time
     if effective_tf <= 0:
         return None
@@ -85,27 +88,98 @@ def compute_derivative(series):
     for i in range(1, len(series)):
         ts_prev, value_prev = series[i-1]
         ts_curr, value_curr = series[i]
-        dt = (ts_curr - ts_prev).total_seconds() / 60.0  # Convert to minutes
+        dt = (ts_curr - ts_prev).total_seconds() / 60.0  # minutes
         if dt > 0:
             deriv = (value_curr - value_prev) / dt
             derivative.append((ts_curr, deriv))
     return derivative
 
+def average_gap_change(gap_series, current_time, window=timedelta(minutes=5)):
+    """
+    Calculate the average change in the gap over the last 'window' duration.
+    
+    gap_series: list of (timestamp, gap_value) sorted by timestamp.
+    current_time: the most recent timestamp (datetime object).
+    window: duration over which to calculate the average change (default 5 minutes).
+    
+    Returns the average rate of change per minute.
+    """
+    start_time = current_time - window
+    relevant_points = [(ts, gap) for ts, gap in gap_series if start_time <= ts <= current_time]
+    if len(relevant_points) < 2:
+        return None  # Not enough data to compute a rate
+    start_ts, start_gap = relevant_points[0]
+    end_ts, end_gap = relevant_points[-1]
+    dt = (end_ts - start_ts).total_seconds() / 60.0
+    if dt == 0:
+        return None
+    avg_change = (end_gap - start_gap) / dt
+    return avg_change
+
+def compute_subnet_emas(records):
+    """
+    For a given subnet's records (assumed sorted by timestamp),
+    compute the 5-minute EMA and 60-minute EMA for both price and emission.
+    We filter the records based on the subnet's latest timestamp.
+    Returns:
+      (ema_5_price, ema_60_price, ema_5_emission, ema_60_emission)
+    or None if insufficient data.
+    """
+    last_ts = records[-1]['snapshot_timestamp']
+    # For 5-minute EMA, use records from last 5 minutes.
+    window_5 = last_ts - timedelta(minutes=5)
+    series_5_price = [(rec['snapshot_timestamp'], float(rec['price'])) for rec in records if rec['snapshot_timestamp'] >= window_5]
+    series_5_emission = [(rec['snapshot_timestamp'], float(rec['emission'])) for rec in records if rec['snapshot_timestamp'] >= window_5]
+    # For 60-minute EMA, use records from last 60 minutes.
+    window_60 = last_ts - timedelta(minutes=60)
+    series_60_price = [(rec['snapshot_timestamp'], float(rec['price'])) for rec in records if rec['snapshot_timestamp'] >= window_60]
+    series_60_emission = [(rec['snapshot_timestamp'], float(rec['emission'])) for rec in records if rec['snapshot_timestamp'] >= window_60]
+    if not series_5_price or not series_60_price or not series_5_emission or not series_60_emission:
+        return None
+    ema_5_price = compute_ema(series_5_price, 5)[-1][1]
+    ema_60_price = compute_ema(series_60_price, 60)[-1][1]
+    ema_5_emission = compute_ema(series_5_emission, 5)[-1][1]
+    ema_60_emission = compute_ema(series_60_emission, 60)[-1][1]
+    return ema_5_price, ema_60_price, ema_5_emission, ema_60_emission
+
+def display_subnet_ema_comparison_table(results):
+    """
+    Display a table comparing the 5m and 60m EMAs for price and emission for each subnet.
+    """
+    header = (
+        f"{'netuid':>6} | {'EMA_5 Price':>12} | {'EMA_60 Price':>12} | {'Price Diff':>12} | {'Price Trend':>12} || "
+        f"{'EMA_5 Emission':>14} | {'EMA_60 Emission':>14} | {'Emission Diff':>14} | {'Emission Trend':>14}"
+    )
+    sep = "-" * len(header)
+    print("\nSubnet 5m vs 60m EMA Comparison:")
+    print(sep)
+    print(header)
+    print(sep)
+    for res in results:
+        price_color = GREEN if res['diff_price'] > 0 else RED if res['diff_price'] < 0 else ""
+        emission_color = GREEN if res['diff_emission'] > 0 else RED if res['diff_emission'] < 0 else ""
+        row = (
+            f"{res['netuid']:>6} | "
+            f"{res['ema5_price']:12.6f} | "
+            f"{res['ema60_price']:12.6f} | "
+            f"{res['diff_price']:12.6f} | {price_color}{res['price_trend']:12}{RESET} || "
+            f"{res['ema5_emission']:14.6f} | "
+            f"{res['ema60_emission']:14.6f} | "
+            f"{res['diff_emission']:14.6f} | {emission_color}{res['emission_trend']:14}{RESET}"
+        )
+        print(row)
+    print(sep)
+
 def main():
-    # Hyperparameters
-    window_minutes = 240              # EMA window (minutes) for subnet-level calculations.
+    # Hyperparameters for overall processing.
+    window_minutes = 240              # Global window for querying subnet-level records.
     max_gap_seconds = 75              # Maximum allowed gap between timestamps.
     timeframes = [5, 10, 15, 60, 240]  # Nominal timeframes for acceleration analysis (in minutes).
-    alpha = 2 / (window_minutes + 1)    # Smoothing factor for subnet-level EMA.
-    max_tf = max(timeframes)           # Maximum nominal timeframe for historical query.
-    roll_window = 5                   # Rolling window size for acceleration computation.
-    savgol_window = 5                 # Window length for Savitzky-Golay filter (must be odd).
-    polyorder = 2                     # Polynomial order for Savitzky-Golay filter.
-
-    # ANSI escape sequences for colors.
-    GREEN = "\033[92m"
-    RED = "\033[91m"
-    RESET = "\033[0m"
+    alpha = 2 / (window_minutes + 1)    # Smoothing factor for global EMA.
+    max_tf = max(timeframes)
+    roll_window = 5
+    savgol_window = 5
+    polyorder = 2
 
     # Load .env variables if present.
     if os.path.exists('.env'):
@@ -138,7 +212,7 @@ def main():
     max_ts_dt = datetime.strptime(max_ts_str, '%Y-%m-%d %H:%M:%S')
     lower_bound = (max_ts_dt - timedelta(minutes=window_minutes)).strftime('%Y-%m-%d %H:%M:%S')
 
-    # Query records for subnet-level processing (last window_minutes minutes).
+    # Query records for subnet-level processing.
     query = """
     SELECT r.netuid, r.price, r.emission, s.snapshot_timestamp
     FROM subnet_records r
@@ -152,16 +226,14 @@ def main():
         print("No records found in the past", window_minutes, "minutes.")
         return
 
-    # Group records by netuid (for subnet-level calculations).
+    # Group records by netuid.
     groups = defaultdict(list)
     for rec in records:
         groups[rec['netuid']].append(rec)
     
-    # Compute the current total price (for subnet-level, excluding netuid 0).
+    # (Optional) Global Total Price EMA and other metrics can remain here...
     total_price = sum(float(recs[-1]['price']) for netuid, recs in groups.items() if netuid != 0)
-
-    # --- Total Price EMA and Acceleration Calculation ---
-    # Query records for the historical time series (last max_tf minutes).
+    # Query for global historical time series...
     lower_bound_tf = (max_ts_dt - timedelta(minutes=max_tf)).strftime('%Y-%m-%d %H:%M:%S')
     query_tf = """
     SELECT r.netuid, r.price, s.snapshot_timestamp
@@ -172,7 +244,6 @@ def main():
     """
     cursor.execute(query_tf, (lower_bound_tf,))
     records_tf = cursor.fetchall()
-    # Build total_by_ts: for each timestamp, sum prices from netuid != 0.
     total_by_ts = {}
     for rec in records_tf:
         if rec['netuid'] == 0:
@@ -180,135 +251,70 @@ def main():
         ts = rec['snapshot_timestamp']
         total_by_ts.setdefault(ts, 0)
         total_by_ts[ts] += float(rec['price'])
-    # Create a sorted time series: list of (timestamp, total_price).
     time_series = sorted(total_by_ts.items())
-
-    # Compute Total Price EMA over the entire time series using the same alpha.
     ema_total = None
     for ts, tp in time_series:
         if ema_total is None:
             ema_total = tp
         else:
             ema_total = alpha * tp + (1 - alpha) * ema_total
-
-    # Display Total Price and Total Price EMA.
     print(f"Total Price: {total_price:.6f}")
-    if total_price > ema_total:
-        total_trend_str = f"{GREEN}{ema_total:.6f}{RESET}"
-    else:
-        total_trend_str = f"{RED}{total_price:.6f}{RESET}"
+    total_trend_str = f"{GREEN}{ema_total:.6f}{RESET}" if total_price > ema_total else f"{RED}{total_price:.6f}{RESET}"
     print(f"Total Price EMA: {total_trend_str}")
 
-    # --- EMA Gap Analysis: 5m vs 60m ---
-    # Compute the 5m and 60m EMAs using the generic function.
-    ema_5m = compute_ema(time_series, 5)
-    ema_60m = compute_ema(time_series, 60)
-    
-    # Calculate the gap between the two EMAs.
-    ema_gap = [(ts, e5 - e60) for ((ts, e5), (_, e60)) in zip(ema_5m, ema_60m)]
-    
-    # Compute the derivative of the gap to check for convergence or divergence.
+    # --- (Optional) Global EMA Gap Analysis and Acceleration Metrics ---
+    ema_5m_global = compute_ema(time_series, 5)
+    ema_60m_global = compute_ema(time_series, 60)
+    ema_gap = [(ts, e5 - e60) for ((ts, e5), (_, e60)) in zip(ema_5m_global, ema_60m_global)]
     gap_derivative = compute_derivative(ema_gap)
     
-    print("\n5m vs 60m EMA Gap Analysis:")
+    print("\n5m vs 60m EMA Gap Analysis (Global):")
     for ts, deriv in gap_derivative:
         if deriv < 0:
-            print(f"At {ts}, the 5m EMA is converging towards the 60m EMA (gap decreasing at {deriv:+.6f} per minute).")
+            print(f"At {ts}, 5m EMA is converging towards 60m EMA (gap decreasing at {deriv:+.6f}/min).")
         else:
-            print(f"At {ts}, the 5m EMA is diverging from the 60m EMA (gap increasing at {deriv:+.6f} per minute).")
-
-    # Compute acceleration metrics for each nominal timeframe.
-    print("\nAcceleration/Deceleration of Total Price (TP - EMA) per timeframe:")
-    if time_series:
-        available_tf = (time_series[-1][0] - time_series[0][0]).total_seconds() / 60.0
+            print(f"At {ts}, 5m EMA is diverging from 60m EMA (gap increasing at {deriv:+.6f}/min).")
+    if ema_gap:
+        current_time = ema_gap[-1][0]
+        avg_derivative = average_gap_change(ema_gap, current_time)
+        if avg_derivative is not None:
+            if avg_derivative < 0:
+                print(f"\nOver the last 5 minutes, global gap has been shrinking at {avg_derivative:+.6f}/min.")
+            else:
+                print(f"\nOver the last 5 minutes, global gap has been widening at {avg_derivative:+.6f}/min.")
+        else:
+            print("\nNot enough data for global average gap change.")
     else:
-        available_tf = 0
+        print("\nNo global EMA gap data available.")
 
-    for tf in timeframes:
-        # If we don't have enough data to cover this timeframe, print N/A
-        if available_tf < tf:
-            acc_str = "N/A"
-        else:
-            # Filter to data within the last 'tf' minutes
-            lower_bound_current = max_ts_dt - timedelta(minutes=tf)
-            ts_filtered = [(ts, tp) for ts, tp in time_series if ts >= lower_bound_current]
-            # Compute rolling acceleration vector
-            roll_accels = compute_rolling_acceleration(ts_filtered, tf, roll_window)
-            if len(roll_accels) < 3:
-                smoothed_accel = roll_accels[-1] if roll_accels else None
-            else:
-                # Use Savitzky-Golay filter to smooth the acceleration vector.
-                smoothed_accel = savgol_filter(np.array(roll_accels), window_length=savgol_window, polyorder=polyorder)[-1]
-            if smoothed_accel is None:
-                acc_str = "N/A"
-            else:
-                if smoothed_accel > 0:
-                    acc_str = f"{GREEN}{smoothed_accel:+.6f}{RESET}"
-                else:
-                    acc_str = f"{RED}{smoothed_accel:+.6f}{RESET}"
-        print(f"  {tf}m: {acc_str}")
-
-    # For subnet-level processing: compute subnet EMAs and other stats.
-    max_candle_count = 0
-    results = []
+    # --- Subnet-Level 5m vs 60m EMA Comparison ---
+    subnet_results = []
     for netuid, recs in groups.items():
-        ema_price = None
-        ema_emission = None
-        prices = []  # For standard deviation calculation.
-        candle_count = 0
-        for i, rec in enumerate(recs):
-            price = float(rec['price'])
-            emission_val = float(rec['emission'])
-            prices.append(price)
-            candle_count += 1
-            if i > 0:
-                prev_time = recs[i-1]['snapshot_timestamp']
-                curr_time = rec['snapshot_timestamp']
-                diff = (curr_time - prev_time).total_seconds()
-                if diff > max_gap_seconds:
-                    print(f"Warning: netuid {netuid} has a gap of {diff:.0f} seconds between candle {i} and candle {i+1}")
-            if ema_price is None:
-                ema_price = price
-            else:
-                ema_price = alpha * price + (1 - alpha) * ema_price
-            if ema_emission is None:
-                ema_emission = emission_val
-            else:
-                ema_emission = alpha * emission_val + (1 - alpha) * ema_emission
-        if candle_count > max_candle_count:
-            max_candle_count = candle_count
-        mean_price = sum(prices) / len(prices)
-        variance = sum((p - mean_price) ** 2 for p in prices) / len(prices)
-        std_price = math.sqrt(variance)
-        current = recs[-1]
-        results.append({
+        # Ensure records for this subnet are sorted by timestamp.
+        recs.sort(key=lambda r: r['snapshot_timestamp'])
+        emas = compute_subnet_emas(recs)
+        if emas is None:
+            continue
+        ema5_price, ema60_price, ema5_emission, ema60_emission = emas
+        diff_price = ema5_price - ema60_price
+        diff_emission = ema5_emission - ema60_emission
+        price_trend = "Diverging" if diff_price > 0 else "Converging" if diff_price < 0 else "Neutral"
+        emission_trend = "Diverging" if diff_emission > 0 else "Converging" if diff_emission < 0 else "Neutral"
+        subnet_results.append({
             'netuid': netuid,
-            'current_price': float(current['price']),
-            'current_emission': float(current['emission']),
-            'ema_price': ema_price,
-            'ema_emission': ema_emission,
-            'std_price': std_price
+            'ema5_price': ema5_price,
+            'ema60_price': ema60_price,
+            'diff_price': diff_price,
+            'price_trend': price_trend,
+            'ema5_emission': ema5_emission,
+            'ema60_emission': ema60_emission,
+            'diff_emission': diff_emission,
+            'emission_trend': emission_trend
         })
 
-    print(f"\nEMA - {window_minutes}m ({max_candle_count} objects)")
-
-    # Sort subnet results by current emission descending and take the top 10.
-    results = sorted(results, key=lambda x: x['current_emission'], reverse=True)[:10]
-
-    header = (f"{'netuid':>6}  {'Curr Price':>14}  {'EMA Price':>14}  "
-              f"{'Curr Emission':>16}  {'EMA Emission':>14}  {'std_price':>12}")
-    print(header)
-    for res in results:
-        if res['current_price'] > res['ema_price']:
-            curr_price_str = f"{GREEN}{res['current_price']:14.6f}{RESET}"
-        else:
-            curr_price_str = f"{RED}{res['current_price']:14.6f}{RESET}"
-        if res['current_emission'] > res['ema_emission']:
-            curr_emission_str = f"{GREEN}{res['current_emission']:16.6f}{RESET}"
-        else:
-            curr_emission_str = f"{RED}{res['current_emission']:16.6f}{RESET}"
-        print(f"{res['netuid']:>6}  {curr_price_str}  {res['ema_price']:14.6f}  "
-              f"{curr_emission_str}  {res['ema_emission']:14.6f}  {res['std_price']:12.6f}")
+    # Sort subnet results by netuid (or any other metric as desired)
+    subnet_results.sort(key=lambda x: x['netuid'])
+    display_subnet_ema_comparison_table(subnet_results)
 
     cursor.close()
     conn.close()
