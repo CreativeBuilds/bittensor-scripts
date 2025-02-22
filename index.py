@@ -2,6 +2,30 @@ import time
 import csv
 import os
 import bittensor
+import mysql.connector
+
+# --- Database Configuration ---
+# These environment variables can be set in your shell or via a config management tool
+db_config = {
+    'host': os.environ.get('DB_HOST', 'localhost'),
+    'user': os.environ.get('DB_USER', 'your_user'),
+    'password': os.environ.get('DB_PASSWORD', 'your_password'),
+    'database': os.environ.get('DB_NAME', 'your_database')
+}
+
+# Connect to the MySQL database running on the same EC2 instance
+conn = mysql.connector.connect(**db_config)
+cursor = conn.cursor()
+
+# Create table if it doesn't exist
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS subnet_logs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        timestamp VARCHAR(255) NOT NULL,
+        subnet_data TEXT NOT NULL
+    )
+''')
+conn.commit()
 
 # Connect to the Bittensor network (e.g., testnet or mainnet)
 sub = bittensor.Subtensor()
@@ -63,13 +87,18 @@ while True:
             for data in rest:
                 log_file.write(f"Netuid: {data['netuid']}  Subnet: {data['subnet_name']}  Price: {data['price']:.4f} {data['symbol']}  Emission: {data['emission']:.4f}\n")
     
-    # --- CSV Logging (One line per minute, without EMA) ---
-    # Format: timestamp, then a serialized snapshot of all subnets (netuid|price|emission)
+    # --- MySQL Logging ---
+    # Serialize subnet_data_sorted: each record as netuid|price|emission, separated by semicolons.
     csv_data_str = ";".join(f"{data['netuid']}|{data['price']:.4f}|{data['emission']:.4f}" for data in subnet_data_sorted)
-    file_exists = os.path.isfile("subnets.csv")
+    insert_query = "INSERT INTO subnet_logs (timestamp, subnet_data) VALUES (%s, %s)"
+    cursor.execute(insert_query, (timestamp, csv_data_str))
+    conn.commit()
+    
+    # --- CSV Logging (Optional) ---
+    csv_file_exists = os.path.isfile("subnets.csv")
     with open("subnets.csv", "a", newline="") as csvfile:
         writer = csv.writer(csvfile)
-        if not file_exists:
+        if not csv_file_exists:
             writer.writerow(["timestamp", "subnet_data"])  # Write header if new file
         writer.writerow([timestamp, csv_data_str])
     
