@@ -4,12 +4,12 @@ import os
 import bittensor
 import mysql.connector
 
-# --- Database Configuration ---
-# These environment variables can be set in your shell or via a config management tool
+# --- Load .env variables if present ---
 if os.path.exists('.env'):
     from dotenv import load_dotenv
     load_dotenv()
 
+# --- Database Configuration ---
 db_config = {
     'host': os.getenv('DB_HOST') or os.environ.get('DB_HOST', 'localhost'),
     'user': os.getenv('DB_USER') or os.environ.get('DB_USER', 'liquidity'),
@@ -21,12 +21,26 @@ db_config = {
 conn = mysql.connector.connect(**db_config)
 cursor = conn.cursor()
 
-# Create table if it doesn't exist
+# --- Create normalized tables if they don't exist ---
+# Table to store snapshot metadata
 cursor.execute('''
-    CREATE TABLE IF NOT EXISTS subnet_logs (
+    CREATE TABLE IF NOT EXISTS subnet_snapshots (
+        snapshot_id INT AUTO_INCREMENT PRIMARY KEY,
+        snapshot_timestamp DATETIME NOT NULL
+    )
+''')
+
+# Table to store individual subnet records for each snapshot
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS subnet_records (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        timestamp VARCHAR(255) NOT NULL,
-        subnet_data TEXT NOT NULL
+        snapshot_id INT NOT NULL,
+        netuid INT NOT NULL,
+        subnet_name VARCHAR(255) NOT NULL,
+        price DECIMAL(12,6) NOT NULL,
+        emission DECIMAL(12,6) NOT NULL,
+        symbol VARCHAR(10) NOT NULL,
+        FOREIGN KEY (snapshot_id) REFERENCES subnet_snapshots(snapshot_id)
     )
 ''')
 conn.commit()
@@ -71,7 +85,7 @@ while True:
     # Sort by emission descending
     subnet_data_sorted = sorted(subnet_data, key=lambda x: x['emission'], reverse=True)
 
-    # Separate top 10 (for console) from the rest (to log file)
+    # Separate top 10 (for console) from the rest (for file logging)
     top10 = subnet_data_sorted[:10]
     rest = subnet_data_sorted[10:]
 
@@ -91,11 +105,26 @@ while True:
             for data in rest:
                 log_file.write(f"Netuid: {data['netuid']}  Subnet: {data['subnet_name']}  Price: {data['price']:.4f} {data['symbol']}  Emission: {data['emission']:.4f}\n")
     
-    # --- MySQL Logging ---
-    # Serialize subnet_data_sorted: each record as netuid|price|emission, separated by semicolons.
-    csv_data_str = ";".join(f"{data['netuid']}|{data['price']:.4f}|{data['emission']:.4f}" for data in subnet_data_sorted)
-    insert_query = "INSERT INTO subnet_logs (timestamp, subnet_data) VALUES (%s, %s)"
-    cursor.execute(insert_query, (timestamp, csv_data_str))
+    # --- MySQL Logging in Normalized Form ---
+    # Insert snapshot record first and retrieve its snapshot_id
+    insert_snapshot_query = "INSERT INTO subnet_snapshots (snapshot_timestamp) VALUES (%s)"
+    cursor.execute(insert_snapshot_query, (timestamp,))
+    snapshot_id = cursor.lastrowid  # Get the auto-generated snapshot ID
+
+    # Insert each subnet record associated with this snapshot
+    insert_record_query = '''
+        INSERT INTO subnet_records (snapshot_id, netuid, subnet_name, price, emission, symbol)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    '''
+    for data in subnet_data_sorted:
+        cursor.execute(insert_record_query, (
+            snapshot_id,
+            data['netuid'],
+            data['subnet_name'],
+            data['price'],
+            data['emission'],
+            data['symbol']
+        ))
     conn.commit()
     
     # --- CSV Logging (Optional) ---
@@ -103,8 +132,16 @@ while True:
     with open("subnets.csv", "a", newline="") as csvfile:
         writer = csv.writer(csvfile)
         if not csv_file_exists:
-            writer.writerow(["timestamp", "subnet_data"])  # Write header if new file
-        writer.writerow([timestamp, csv_data_str])
+            writer.writerow(["timestamp", "netuid", "subnet_name", "price", "emission", "symbol"])
+        for data in subnet_data_sorted:
+            writer.writerow([
+                timestamp,
+                data['netuid'],
+                data['subnet_name'],
+                f"{data['price']:.4f}",
+                f"{data['emission']:.4f}",
+                data['symbol']
+            ])
     
-    # Wait 60 seconds before the next check
+    # Wait 60 seconds before the next snapshot
     time.sleep(60)
