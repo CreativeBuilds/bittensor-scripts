@@ -4,14 +4,23 @@ import mysql.connector
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-def compute_acceleration(time_series, timeframe):
+def compute_acceleration(time_series, nominal_timeframe):
     """
-    Given a sorted list of (timestamp, total_price) and a timeframe (in minutes),
-    compute the EMA of total_price (using alpha = 2/(timeframe+1)) and then compute
-    the acceleration as the rate of change of (TP - EMA) between the last two data points.
+    Given a sorted list of (timestamp, total_price) and a nominal timeframe (in minutes),
+    compute the EMA of total_price using the effective timeframe (i.e. actual data span if less than nominal).
+    Then compute the acceleration as the rate of change of (TP - EMA) between the last two data points.
     Returns acceleration (per minute) or None if not computable.
     """
-    alpha_tf = 2 / (timeframe + 1)
+    if not time_series:
+        return None
+    # Determine the actual available time span in minutes
+    actual_time = (time_series[-1][0] - time_series[0][0]).total_seconds() / 60.0
+    # Use the full available span if it's less than the nominal timeframe
+    effective_tf = nominal_timeframe if actual_time >= nominal_timeframe else actual_time
+    if effective_tf <= 0:
+        return None
+
+    alpha_tf = 2 / (effective_tf + 1)
     ema = None
     diffs = []  # List of tuples (timestamp, TP - EMA)
     for ts, tp in time_series:
@@ -33,11 +42,11 @@ def compute_acceleration(time_series, timeframe):
 
 def main():
     # Hyperparameters
-    window_minutes = 12                     # EMA window (minutes) for subnet-level calculations.
+    window_minutes = 240                     # EMA window (minutes) for subnet-level calculations.
     max_gap_seconds = 75                    # Maximum allowed gap between timestamps.
-    timeframes = [5, 10, 15, 60, 240]        # Timeframes for acceleration analysis (in minutes).
+    timeframes = [5, 10, 15, 60, 240]        # Nominal timeframes for acceleration analysis (in minutes).
     alpha = 2 / (window_minutes + 1)          # Smoothing factor for subnet-level EMA.
-    max_tf = max(timeframes)                 # Maximum timeframe for historical query.
+    max_tf = max(timeframes)                 # Maximum nominal timeframe for historical query.
 
     # ANSI escape sequences for colors.
     GREEN = "\033[92m"
@@ -120,7 +129,7 @@ def main():
     # Create a sorted time series: list of (timestamp, total_price).
     time_series = sorted(total_by_ts.items())
 
-    # Compute Total Price EMA over the entire time series using the same alpha.
+    # Compute Total Price EMA over the entire time series using the same alpha as before.
     ema_total = None
     for ts, tp in time_series:
         if ema_total is None:
@@ -137,12 +146,21 @@ def main():
         total_trend_str = f"{RED}{total_price:.6f}{RESET}"
     print(f"Total Price EMA: {total_trend_str}")
 
-    # Compute acceleration metrics for each timeframe and display.
+    # Compute acceleration metrics for each nominal timeframe and display.
     print("\nAcceleration/Deceleration of Total Price (TP - EMA) per timeframe:")
+    # Determine available data span (in minutes) from the time series
+    if time_series:
+        available_tf = (time_series[-1][0] - time_series[0][0]).total_seconds() / 60.0
+    else:
+        available_tf = 0
+
     for tf in timeframes:
-        lower_bound_current = max_ts_dt - timedelta(minutes=tf)
-        # Filter the time_series for timestamps >= lower_bound_current.
-        ts_filtered = [(ts, tp) for ts, tp in time_series if ts >= lower_bound_current]
+        # If available data span is less than the nominal timeframe, use entire time_series.
+        if available_tf < tf:
+            ts_filtered = time_series
+        else:
+            lower_bound_current = max_ts_dt - timedelta(minutes=tf)
+            ts_filtered = [(ts, tp) for ts, tp in time_series if ts >= lower_bound_current]
         if len(ts_filtered) < 2:
             acc_str = "N/A"
         else:
