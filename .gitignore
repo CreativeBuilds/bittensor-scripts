@@ -1,0 +1,9 @@
+node_modules
+.venv
+.specstory
+addresses.txt
+liquidity_log.csv
+subnet_prices.csv
+subnet_prices.log
+subnet_rest.log
+subnets.csv
