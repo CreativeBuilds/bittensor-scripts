@@ -3,6 +3,8 @@ import time
 import datetime
 import decimal
 from functools import wraps
+from collections import defaultdict
+from datetime import timedelta
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -21,7 +23,7 @@ db_config = {
     'database': os.getenv('DB_NAME', 'prices')
 }
 
-# Create a global database connection and cursor (dictionary cursor for ease-of-use)
+# Global database connection and cursor (using a dictionary cursor)
 db_connection = mysql.connector.connect(**db_config)
 db_cursor = db_connection.cursor(dictionary=True)
 
@@ -53,34 +55,187 @@ def cache_rate_limit(func):
     """
     @wraps(func)
     async def wrapper(request: Request, *args, **kwargs):
-        # Generate a unique cache key: client IP + full URL (path + query)
         key = f"{request.client.host}:{request.url.path}?{request.url.query}"
         now = time.time()
         if key in response_cache:
             cached = response_cache[key]
             if now - cached["timestamp"] < 10:
                 return JSONResponse(content=cached["data"])
-        # Call the actual endpoint function
         result = await func(request, *args, **kwargs)
-        # Serialize result before caching
         serialized_result = serialize_data(result)
         response_cache[key] = {"data": serialized_result, "timestamp": time.time()}
         return JSONResponse(content=serialized_result)
     return wrapper
 
+# ----- Analysis Helper Functions -----
+def compute_ema(time_series, timeframe):
+    """
+    Compute the EMA for a given time_series (list of (timestamp, value))
+    over the specified timeframe (in minutes).
+    Returns a list of (timestamp, ema_value).
+    """
+    alpha = 2 / (timeframe + 1)
+    ema = None
+    ema_values = []
+    for ts, value in time_series:
+        if ema is None:
+            ema = value
+        else:
+            ema = alpha * value + (1 - alpha) * ema
+        ema_values.append((ts, ema))
+    return ema_values
+
+def compute_subnet_gap_trends(records):
+    """
+    For a given subnet’s records (assumed sorted by timestamp), compute the time series for:
+      - 5m EMA for price (using records from last 5 minutes)
+      - 60m EMA for price (using records from last 60 minutes)
+      - 5m EMA for emission (using records from last 5 minutes)
+      - 60m EMA for emission (using records from last 60 minutes)
+    Then define the gap as: Gap(t) = EMA_5m(t) - EMA_60m(t)
+    and compute the change (delta) in the gap over the 5-minute window 
+    (delta = gap_end - gap_begin).
+    Returns a dictionary with:
+      - final_ema5_price, final_ema60_price, final_gap_price, delta_gap_price,
+      - final_ema5_emission, final_ema60_emission, final_gap_emission, delta_gap_emission
+    or None if insufficient data.
+    """
+    last_ts = records[-1]['snapshot_timestamp']
+    window_5 = last_ts - timedelta(minutes=5)
+    window_60 = last_ts - timedelta(minutes=60)
+    
+    series_5_price = [(rec['snapshot_timestamp'], float(rec['price']))
+                      for rec in records if rec['snapshot_timestamp'] >= window_5]
+    series_60_price = [(rec['snapshot_timestamp'], float(rec['price']))
+                       for rec in records if rec['snapshot_timestamp'] >= window_60]
+    series_5_emission = [(rec['snapshot_timestamp'], float(rec['emission']))
+                         for rec in records if rec['snapshot_timestamp'] >= window_5]
+    series_60_emission = [(rec['snapshot_timestamp'], float(rec['emission']))
+                          for rec in records if rec['snapshot_timestamp'] >= window_60]
+    
+    # Need at least two points in the 5m series to measure change.
+    if len(series_5_price) < 2 or len(series_60_price) < 1 or len(series_5_emission) < 2 or len(series_60_emission) < 1:
+        return None
+    
+    ema5_price_series = compute_ema(series_5_price, 5)
+    ema60_price_series = compute_ema(series_60_price, 60)
+    ema5_emission_series = compute_ema(series_5_emission, 5)
+    ema60_emission_series = compute_ema(series_60_emission, 60)
+    
+    gap_price_begin = ema5_price_series[0][1] - ema60_price_series[0][1]
+    gap_price_end   = ema5_price_series[-1][1] - ema60_price_series[-1][1]
+    delta_gap_price = gap_price_end - gap_price_begin
+
+    gap_emission_begin = ema5_emission_series[0][1] - ema60_emission_series[0][1]
+    gap_emission_end   = ema5_emission_series[-1][1] - ema60_emission_series[-1][1]
+    delta_gap_emission = gap_emission_end - gap_emission_begin
+
+    return {
+        'final_ema5_price': ema5_price_series[-1][1],
+        'final_ema60_price': ema60_price_series[-1][1],
+        'final_gap_price': gap_price_end,
+        'delta_gap_price': delta_gap_price,
+        'final_ema5_emission': ema5_emission_series[-1][1],
+        'final_ema60_emission': ema60_emission_series[-1][1],
+        'final_gap_emission': gap_emission_end,
+        'delta_gap_emission': delta_gap_emission
+    }
+
+def get_gap_analysis():
+    """
+    Compute overall analysis for subnet gap trends over the last 240 minutes.
+    Returns a dictionary with overall total price, its EMA, and a list of
+    computed gap trends for each subnet (top 10 by current emission).
+    """
+    window_minutes = 240
+    # Get latest snapshot timestamp
+    db_cursor.execute("SELECT MAX(snapshot_timestamp) AS max_ts FROM subnet_snapshots")
+    max_ts_result = db_cursor.fetchone()
+    if not max_ts_result or not max_ts_result['max_ts']:
+        return None
+    max_ts_dt = max_ts_result['max_ts']
+    lower_bound = max_ts_dt - timedelta(minutes=window_minutes)
+
+    query = """
+    SELECT r.netuid, r.price, r.emission, s.snapshot_timestamp
+    FROM subnet_records r
+    JOIN subnet_snapshots s ON r.snapshot_id = s.snapshot_id
+    WHERE s.snapshot_timestamp >= %s
+    ORDER BY r.netuid, s.snapshot_timestamp
+    """
+    db_cursor.execute(query, (lower_bound,))
+    records = db_cursor.fetchall()
+    if not records:
+        return None
+
+    groups = defaultdict(list)
+    for rec in records:
+        # Convert snapshot_timestamp if needed (assumed already datetime)
+        if rec['netuid'] == 0:
+            continue
+        groups[rec['netuid']].append(rec)
+
+    # Compute global total price and total price EMA
+    total_price = sum(float(recs[-1]['price']) for netuid, recs in groups.items() if recs)
+    total_by_ts = {}
+    for rec in records:
+        if rec['netuid'] == 0:
+            continue
+        ts = rec['snapshot_timestamp']
+        total_by_ts.setdefault(ts, 0)
+        total_by_ts[ts] += float(rec['price'])
+    time_series = sorted(total_by_ts.items())
+    ema_total = None
+    alpha = 2 / (window_minutes + 1)
+    for ts, tp in time_series:
+        if ema_total is None:
+            ema_total = tp
+        else:
+            ema_total = alpha * tp + (1 - alpha) * ema_total
+
+    subnet_results = []
+    for netuid, recs in groups.items():
+        recs.sort(key=lambda r: r['snapshot_timestamp'])
+        gap_info = compute_subnet_gap_trends(recs)
+        if gap_info is None:
+            continue
+        current_emission = float(recs[-1]['emission'])
+        subnet_results.append({
+            'netuid': netuid,
+            'current_emission': current_emission,
+            'final_ema5_price': gap_info['final_ema5_price'],
+            'final_ema60_price': gap_info['final_ema60_price'],
+            'final_gap_price': gap_info['final_gap_price'],
+            'delta_gap_price': gap_info['delta_gap_price'],
+            'final_ema5_emission': gap_info['final_ema5_emission'],
+            'final_ema60_emission': gap_info['final_ema60_emission'],
+            'final_gap_emission': gap_info['final_gap_emission'],
+            'delta_gap_emission': gap_info['delta_gap_emission']
+        })
+
+    # Filter to top 10 subnets by current emission (highest first) then sort by netuid
+    subnet_results.sort(key=lambda x: x['current_emission'], reverse=True)
+    top_subnets = subnet_results[:10]
+    top_subnets.sort(key=lambda x: x['netuid'])
+
+    return {
+        'total_price': total_price,
+        'total_price_ema': ema_total,
+        'subnet_gap_trends': top_subnets
+    }
+
+# ----- Existing Endpoints -----
 @app.get("/snapshots/latest")
 @cache_rate_limit
 async def get_latest_snapshot(request: Request):
     """
     Returns the most recent snapshot along with its subnet records.
     """
-    # Get the latest snapshot (order by timestamp descending)
     db_cursor.execute("SELECT * FROM subnet_snapshots ORDER BY snapshot_timestamp DESC LIMIT 1")
     snapshot = db_cursor.fetchone()
     if not snapshot:
         raise HTTPException(status_code=404, detail="No snapshots found")
     snapshot_id = snapshot["snapshot_id"]
-    # Retrieve associated subnet records
     db_cursor.execute("SELECT * FROM subnet_records WHERE snapshot_id = %s", (snapshot_id,))
     records = db_cursor.fetchall()
     snapshot["records"] = records
@@ -106,8 +261,9 @@ async def get_snapshot(request: Request, snapshot_id: int):
 async def get_subnets(request: Request, netuid: int = None, price: float = None, emission: float = None):
     """
     Returns subnet records, optionally filtered by netuid, price, and emission.
+    Also returns analysis computed over the past 240 minutes.
     """
-    # Start with a base query
+    # Raw filtered query (same as before)
     query = "SELECT * FROM subnet_records WHERE 1=1"
     params = []
     if netuid is not None:
@@ -120,10 +276,16 @@ async def get_subnets(request: Request, netuid: int = None, price: float = None,
         query += " AND emission = %s"
         params.append(emission)
     db_cursor.execute(query, tuple(params))
-    results = db_cursor.fetchall()
-    return results
+    records = db_cursor.fetchall()
+
+    # Compute additional analysis over a 240 minute window
+    analysis = get_gap_analysis()
+
+    return {
+        "records": records,
+        "analysis": analysis
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    # Run the FastAPI app with uvicorn on host 0.0.0.0:8000
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("server:app", host="0.0.0.0", port=7272, reload=True)
