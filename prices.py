@@ -59,6 +59,38 @@ def compute_rolling_acceleration(time_series, nominal_timeframe, roll_window=5):
             roll_accels.append(accel)
     return roll_accels
 
+def compute_ema(time_series, timeframe):
+    """
+    Compute the EMA for a given time_series (list of (timestamp, value)) over the specified timeframe.
+    Returns a list of (timestamp, ema_value).
+    """
+    alpha = 2 / (timeframe + 1)
+    ema = None
+    ema_values = []
+    for ts, value in time_series:
+        if ema is None:
+            ema = value
+        else:
+            ema = alpha * value + (1 - alpha) * ema
+        ema_values.append((ts, ema))
+    return ema_values
+
+def compute_derivative(series):
+    """
+    Given a time series (list of (timestamp, value)), compute the derivative (rate of change)
+    between consecutive points.
+    Returns a list of (timestamp, derivative_value).
+    """
+    derivative = []
+    for i in range(1, len(series)):
+        ts_prev, value_prev = series[i-1]
+        ts_curr, value_curr = series[i]
+        dt = (ts_curr - ts_prev).total_seconds() / 60.0  # Convert to minutes
+        if dt > 0:
+            deriv = (value_curr - value_prev) / dt
+            derivative.append((ts_curr, deriv))
+    return derivative
+
 def main():
     # Hyperparameters
     window_minutes = 240              # EMA window (minutes) for subnet-level calculations.
@@ -121,7 +153,6 @@ def main():
         return
 
     # Group records by netuid (for subnet-level calculations).
-    from collections import defaultdict
     groups = defaultdict(list)
     for rec in records:
         groups[rec['netuid']].append(rec)
@@ -167,6 +198,24 @@ def main():
     else:
         total_trend_str = f"{RED}{total_price:.6f}{RESET}"
     print(f"Total Price EMA: {total_trend_str}")
+
+    # --- EMA Gap Analysis: 5m vs 60m ---
+    # Compute the 5m and 60m EMAs using the generic function.
+    ema_5m = compute_ema(time_series, 5)
+    ema_60m = compute_ema(time_series, 60)
+    
+    # Calculate the gap between the two EMAs.
+    ema_gap = [(ts, e5 - e60) for ((ts, e5), (_, e60)) in zip(ema_5m, ema_60m)]
+    
+    # Compute the derivative of the gap to check for convergence or divergence.
+    gap_derivative = compute_derivative(ema_gap)
+    
+    print("\n5m vs 60m EMA Gap Analysis:")
+    for ts, deriv in gap_derivative:
+        if deriv < 0:
+            print(f"At {ts}, the 5m EMA is converging towards the 60m EMA (gap decreasing at {deriv:+.6f} per minute).")
+        else:
+            print(f"At {ts}, the 5m EMA is diverging from the 60m EMA (gap increasing at {deriv:+.6f} per minute).")
 
     # Compute acceleration metrics for each nominal timeframe.
     print("\nAcceleration/Deceleration of Total Price (TP - EMA) per timeframe:")
