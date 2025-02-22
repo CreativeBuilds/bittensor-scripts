@@ -32,20 +32,19 @@ def compute_acceleration(time_series, timeframe):
     return acceleration
 
 def main():
-    # Hyperparameter for subnet processing: number of minutes for the EMA window.
-    window_minutes = 12
-    alpha = 2 / (window_minutes + 1)  # Smoothing factor for the EMA (for subnet-level)
+    # Hyperparameters
+    window_minutes = 12                     # EMA window (minutes) for subnet-level calculations.
+    max_gap_seconds = 75                    # Maximum allowed gap between timestamps.
+    timeframes = [5, 10, 15, 60, 240]        # Timeframes for acceleration analysis (in minutes).
+    alpha = 2 / (window_minutes + 1)          # Smoothing factor for subnet-level EMA.
+    max_tf = max(timeframes)                 # Maximum timeframe for historical query.
 
-    # Timeframes for acceleration analysis (in minutes)
-    timeframes = [5, 10, 15, 60, 240]
-    max_tf = max(timeframes)  # Maximum timeframe for historical query
-
-    # ANSI escape sequences for colors
+    # ANSI escape sequences for colors.
     GREEN = "\033[92m"
     RED = "\033[91m"
     RESET = "\033[0m"
 
-    # Load .env variables if present
+    # Load .env variables if present.
     if os.path.exists('.env'):
         from dotenv import load_dotenv
         load_dotenv()
@@ -58,11 +57,11 @@ def main():
         'database': os.getenv('DB_NAME', 'prices')
     }
 
-    # Connect to the MySQL database
+    # Connect to the MySQL database.
     conn = mysql.connector.connect(**db_config)
     cursor = conn.cursor(dictionary=True)
 
-    # Get the latest snapshot timestamp
+    # Get the latest snapshot timestamp.
     cursor.execute("SELECT MAX(snapshot_timestamp) AS max_ts FROM subnet_snapshots")
     max_ts_result = cursor.fetchone()
     if not max_ts_result or not max_ts_result['max_ts']:
@@ -72,11 +71,11 @@ def main():
     max_ts_str = max_ts_result['max_ts'].strftime('%Y-%m-%d %H:%M:%S')
     print("Latest snapshot timestamp:", max_ts_str)
     
-    # Compute lower bound for subnet-level query (window_minutes)
+    # Compute lower bound for subnet-level query.
     max_ts_dt = datetime.strptime(max_ts_str, '%Y-%m-%d %H:%M:%S')
     lower_bound = (max_ts_dt - timedelta(minutes=window_minutes)).strftime('%Y-%m-%d %H:%M:%S')
 
-    # Query records for subnet-level processing (last window_minutes minutes)
+    # Query records for subnet-level processing (last window_minutes minutes).
     query = """
     SELECT r.netuid, r.price, r.emission, s.snapshot_timestamp
     FROM subnet_records r
@@ -90,16 +89,16 @@ def main():
         print("No records found in the past", window_minutes, "minutes.")
         return
 
-    # Group records by netuid (for subnet-level calculations)
+    # Group records by netuid (for subnet-level calculations).
     groups = defaultdict(list)
     for rec in records:
         groups[rec['netuid']].append(rec)
     
-    # Compute the current total price (for subnet-level, excluding netuid 0)
+    # Compute the current total price (for subnet-level, excluding netuid 0).
     total_price = sum(float(recs[-1]['price']) for netuid, recs in groups.items() if netuid != 0)
 
     # --- Total Price EMA and Acceleration Calculation ---
-    # Query records for the historical time series (last max_tf minutes)
+    # Query records for the historical time series (last max_tf minutes).
     lower_bound_tf = (max_ts_dt - timedelta(minutes=max_tf)).strftime('%Y-%m-%d %H:%M:%S')
     query_tf = """
     SELECT r.netuid, r.price, s.snapshot_timestamp
@@ -110,7 +109,7 @@ def main():
     """
     cursor.execute(query_tf, (lower_bound_tf,))
     records_tf = cursor.fetchall()
-    # Build total_by_ts dictionary: for each timestamp, sum prices from netuid != 0
+    # Build total_by_ts dictionary: for each timestamp, sum prices from netuid != 0.
     total_by_ts = {}
     for rec in records_tf:
         if rec['netuid'] == 0:
@@ -118,12 +117,10 @@ def main():
         ts = rec['snapshot_timestamp']
         total_by_ts.setdefault(ts, 0)
         total_by_ts[ts] += float(rec['price'])
-    # Create a sorted time series: list of (timestamp, total_price)
+    # Create a sorted time series: list of (timestamp, total_price).
     time_series = sorted(total_by_ts.items())
 
-    # Compute Total Price EMA using the full time series and same smoothing factor as before (for reporting, though we'll compare trends)
-    # Here we compute an EMA over the entire time series using alpha for window_minutes? 
-    # However, for acceleration analysis we recompute per timeframe below.
+    # Compute Total Price EMA over the entire time series using the same alpha.
     ema_total = None
     for ts, tp in time_series:
         if ema_total is None:
@@ -131,20 +128,20 @@ def main():
         else:
             ema_total = alpha * tp + (1 - alpha) * ema_total
 
-    # Display Total Price and Total Price EMA
+    # Display Total Price and Total Price EMA.
     print(f"Total Price: {total_price:.6f}")
-    # Use the current total price if it is lower than its EMA (indicating downtrend)
+    # If current total price is lower than its EMA (indicating downtrend), display current TP in red.
     if total_price > ema_total:
         total_trend_str = f"{GREEN}{ema_total:.6f}{RESET}"
     else:
         total_trend_str = f"{RED}{total_price:.6f}{RESET}"
     print(f"Total Price EMA: {total_trend_str}")
 
-    # Compute acceleration metrics for each timeframe and display
+    # Compute acceleration metrics for each timeframe and display.
     print("\nAcceleration/Deceleration of Total Price (TP - EMA) per timeframe:")
     for tf in timeframes:
         lower_bound_current = max_ts_dt - timedelta(minutes=tf)
-        # Filter the time_series for timestamps >= lower_bound_current
+        # Filter the time_series for timestamps >= lower_bound_current.
         ts_filtered = [(ts, tp) for ts, tp in time_series if ts >= lower_bound_current]
         if len(ts_filtered) < 2:
             acc_str = "N/A"
@@ -153,20 +150,19 @@ def main():
             if acc is None:
                 acc_str = "N/A"
             else:
-                # Color green if acceleration is positive, red if negative
                 if acc > 0:
                     acc_str = f"{GREEN}{acc:+.6f}{RESET}"
                 else:
                     acc_str = f"{RED}{acc:+.6f}{RESET}"
         print(f"  {tf}m: {acc_str}")
 
-    # For the subnet-level processing, update max_candle_count and compute subnet EMAs as before.
+    # For subnet-level processing: update max_candle_count and compute subnet EMAs.
     max_candle_count = 0
     results = []
     for netuid, recs in groups.items():
         ema_price = None
         ema_emission = None
-        prices = []  # For standard deviation calculation
+        prices = []  # For standard deviation calculation.
         candle_count = 0
         for i, rec in enumerate(recs):
             price = float(rec['price'])
@@ -177,7 +173,7 @@ def main():
                 prev_time = recs[i-1]['snapshot_timestamp']
                 curr_time = rec['snapshot_timestamp']
                 diff = (curr_time - prev_time).total_seconds()
-                if diff > 65:
+                if diff > max_gap_seconds:
                     print(f"Warning: netuid {netuid} has a gap of {diff:.0f} seconds between candle {i} and candle {i+1}")
             if ema_price is None:
                 ema_price = price
@@ -202,13 +198,13 @@ def main():
             'std_price': std_price
         })
 
-    # Now print the EMA window info (for subnet-level) along with the max candle count
+    # Print the EMA window info for subnet-level data.
     print(f"\nEMA - {window_minutes}m ({max_candle_count} objects)")
 
-    # Sort subnet results by current emission descending and take the top 10
+    # Sort subnet results by current emission descending and take the top 10.
     results = sorted(results, key=lambda x: x['current_emission'], reverse=True)[:10]
 
-    # Print the table header for subnet details
+    # Print the table header for subnet details.
     header = (f"{'netuid':>6}  {'Curr Price':>14}  {'EMA Price':>14}  "
               f"{'Curr Emission':>16}  {'EMA Emission':>14}  {'std_price':>12}")
     print(header)
